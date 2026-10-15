@@ -1,0 +1,55 @@
+name: Daily upstream sync
+
+on:
+  schedule:
+    # 01:23 UTC = 09:23 Asia/Shanghai, every day.
+    - cron: '23 1 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'n1zjqo/d2r-mobile'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: jhaizhou-ops/d2r-mobile
+    steps:
+      - name: Merge upstream main without overwriting fork changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent="$(gh api "repos/$GITHUB_REPOSITORY" --jq '.parent.full_name')"
+          if [[ "$parent" != "$UPSTREAM" ]]; then
+            echo "::error::Unexpected upstream repository; refusing to sync."
+            exit 1
+          fi
+          upstream_sha="$(gh api "repos/$UPSTREAM/commits/main" --jq '.sha')"
+          # GitHub merges upstream into the fork; conflicts fail instead of forcing a reset.
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream"             -f branch=main > sync-result.json; then
+            echo "::error::Upstream sync failed. Resolve any conflict manually; no force reset was attempted."
+            exit 1
+          fi
+          cat sync-result.json
+          behind="$(gh api "repos/$GITHUB_REPOSITORY/compare/$upstream_sha...main" --jq '.behind_by')"
+          if [[ "$behind" != "0" ]]; then
+            echo "::error::Verification failed: main is still behind the captured upstream revision."
+            exit 1
+          fi
+          {
+            echo '### Upstream sync completed'
+            echo "Source: $UPSTREAM (main)"
+            echo "Destination: $GITHUB_REPOSITORY (main)"
+            echo "Verified upstream commit: $upstream_sha"
+            echo 'Fork changes are preserved. No force push or reset is used.'
+            echo
+            echo 'GitHub can disable schedules after 60 days without repository activity.'
+          } >> "$GITHUB_STEP_SUMMARY"
